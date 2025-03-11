@@ -5,7 +5,7 @@ import torch
 import shutil
 
 import server
-import folder_paths
+from comfy.cmd import folder_paths
 
 web = server.web
 

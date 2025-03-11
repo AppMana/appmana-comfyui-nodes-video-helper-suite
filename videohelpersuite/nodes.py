@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image, ExifTags
 from PIL.PngImagePlugin import PngInfo
 
-import folder_paths
+from comfy.cmd import folder_paths
 from .logger import logger
 from .image_latent_nodes import *
 from .load_video_nodes import LoadVideoUpload, LoadVideoPath, LoadVideoFFmpegUpload, LoadVideoFFmpegPath, LoadImagePath
