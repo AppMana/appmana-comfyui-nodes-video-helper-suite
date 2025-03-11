@@ -75,7 +75,7 @@ def gen_format_widgets(video_format):
                 yield item
                 video_format[k] = item[0]
 
-base_formats_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "video_formats")
+base_formats_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "video_formats")
 @cached(5)
 def get_video_formats():
     format_files = {}
