@@ -5,7 +5,7 @@ from threading import Thread
 import torch.nn.functional as F
 import torch
 
-import latent_preview
+from comfy.cmd import latent_preview
 import server
 serv = server.PromptServer.instance
 
