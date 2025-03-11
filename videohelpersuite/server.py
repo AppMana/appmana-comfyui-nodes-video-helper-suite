@@ -2,6 +2,7 @@ import os
 import subprocess
 import re
 from comfy.cmd import server
+from comfy.cmd import folder_paths
 import asyncio
 
 from .utils import is_url, get_sorted_dir_files_from_directory, ffmpeg_path, \
