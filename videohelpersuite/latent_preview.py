@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torch
 
 from comfy.cmd import latent_preview
-import server
+from comfy.cmd import server
 serv = server.PromptServer.instance
 
 from .utils import hook
