@@ -5,6 +5,7 @@ version = "1.5.9"
 license = { file = "LICENSE" }
 dependencies = [
     "comfyui",
+    "comfyui-frontend-package",
     "opencv-python-headless",
     "imageio-ffmpeg",
 ]
