@@ -39,5 +39,5 @@ packages = [
 "*" = ["**/*.js", "**/*.json"]
 
 [project.entry-points."comfyui.custom_nodes"]
-comfyui_video_helper_suite = "comfyui_video_helper_suite.videohelpersuite.nodes"
+comfyui_video_helper_suite = "comfyui_video_helper_suite.videohelpersuite"
 comfyui_video_helper_suite_web_directory = "comfyui_video_helper_suite"
