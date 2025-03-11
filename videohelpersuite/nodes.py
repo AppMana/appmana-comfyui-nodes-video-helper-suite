@@ -35,8 +35,9 @@ VHS_VIDEO_FORMATS_FOLDER_NAME = "VHS_video_formats"
 folder_paths.add_model_folder_path(VHS_VIDEO_FORMATS_FOLDER_NAME, extensions={".json"})
 if 'VHS_video_formats' not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["VHS_video_formats"] = ((),{".json"})
-if len(folder_paths.folder_names_and_paths['VHS_video_formats'][1]) == 0:
-    folder_paths.folder_names_and_paths["VHS_video_formats"][1].add(".json")
+if isinstance(folder_paths.folder_names_and_paths['VHS_video_formats'][1], Iterable):
+    if len(folder_paths.folder_names_and_paths['VHS_video_formats'][1]) == 0:
+        folder_paths.folder_names_and_paths["VHS_video_formats"][1].add(".json")
 audio_extensions = ['mp3', 'mp4', 'wav', 'ogg']
 
 
