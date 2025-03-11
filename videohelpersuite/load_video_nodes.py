@@ -11,7 +11,7 @@ import time
 
 from comfy.cmd import folder_paths
 from comfy.utils import common_upscale, ProgressBar
-import nodes
+from comfy.nodes import base_nodes as nodes
 from comfy.k_diffusion.utils import FolderOfImages
 from .logger import logger
 from .utils import BIGMAX, DIMMAX, calculate_file_hash, get_sorted_dir_files_from_directory,\
