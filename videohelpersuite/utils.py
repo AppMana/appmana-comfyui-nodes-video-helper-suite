@@ -3,12 +3,12 @@ import os
 import re
 import shutil
 import subprocess
-import sys
-import warnings
+import re
+import time
 from collections.abc import Mapping
 from typing import Iterable
 from typing import Union
-
+import functools
 import torch
 from torch import Tensor
 
@@ -21,11 +21,12 @@ BIGMAX = (2 ** 53 - 1)
 
 DIMMAX = 8192
 
+ENCODE_ARGS = ("utf-8", 'backslashreplace')
 
 def ffmpeg_suitability(path):
     try:
         version = subprocess.run([path, "-version"], check=True,
-                                 capture_output=True).stdout.decode("utf-8")
+                                 capture_output=True).stdout.decode(*ENCODE_ARGS)
     except:
         return 0
     score = 0
@@ -43,10 +44,17 @@ def ffmpeg_suitability(path):
             score += int(copyright_year)
     return score
 
-class ImageOrLatent(str):
+class MultiInput(str):
+    def __new__(cls, string, allowed_types="*"):
+        res = super().__new__(cls, string)
+        res.allowed_types=allowed_types
+        return res
     def __ne__(self, other):
-        return not (other == "IMAGE" or other == "LATENT" or other == "*")
-imageOrLatent = ImageOrLatent("IMAGE")
+        if self.allowed_types == "*" or other == "*":
+            return False
+        return other not in self.allowed_types
+imageOrLatent = MultiInput("IMAGE", ["IMAGE", "LATENT"])
+floatOrInt = MultiInput("FLOAT", ["FLOAT", "INT"])
 
 if "VHS_FORCE_FFMPEG_PATH" in os.environ:
     ffmpeg_path = os.environ.get("VHS_FORCE_FFMPEG_PATH")
@@ -103,17 +111,16 @@ def try_download_video(url):
                               "-P", folder_paths.get_temp_directory(), url],
                              capture_output=True, check=True)
         #strip newline
-        file = res.stdout.decode('utf-8')[:-1]
+        file = res.stdout.decode(*ENCODE_ARGS)[:-1]
     except subprocess.CalledProcessError as e:
         raise Exception("An error occurred in the yt-dl process:\n" \
-                + e.stderr.decode("utf-8"))
+                + e.stderr.decode(*ENCODE_ARGS))
         file = None
     download_history[url] = file
     return file
 
-
-def is_safe_path(path):
-    if "VHS_STRICT_PATHS" not in os.environ:
+def is_safe_path(path, strict=False):
+    if "VHS_STRICT_PATHS" not in os.environ and not strict:
         return True
     basedir = os.path.abspath('.')
     try:
@@ -226,10 +233,10 @@ def get_audio(file, start_time=0, duration=0):
         res = subprocess.run(args + ["-f", "f32le", "-"],
                              capture_output=True, check=True)
         audio = torch.frombuffer(bytearray(res.stdout), dtype=torch.float32)
-        match = re.search(', (\\d+) Hz, (\\w+), ', res.stderr.decode('utf-8'))
+        match = re.search(', (\\d+) Hz, (\\w+), ',res.stderr.decode(*ENCODE_ARGS))
     except subprocess.CalledProcessError as e:
         raise Exception(f"VHS failed to extract audio from {file}:\n" \
-                        + e.stderr.decode("utf-8"))
+                + e.stderr.decode(*ENCODE_ARGS))
     if match:
         ar = int(match.group(1))
         # NOTE: Just throwing an error for other channel types right now
@@ -404,9 +411,43 @@ def select_indexes(input_obj: Union[Tensor, list], idxs: list):
     else:
         return [input_obj[i] for i in idxs]
 
+def merge_filter_args(args, ftype="-vf"):
+    #TODO This doesn't account for filter_complex
+    #Will likely need to convert all filters to filter complex in the future
+    #But that requires source/output deduplication
+    try:
+        start_index = args.index(ftype)+1
+        index = start_index
+        while True:
+            index = args.index(ftype, index)
+            args[start_index] += ',' + args[index+1]
+            args.pop(index)
+            args.pop(index)
+    except ValueError:
+        pass
 
 def select_indexes_from_str(input_obj: Union[Tensor, list], indexes: str, err_if_missing=True, err_if_empty=True):
     real_idxs = convert_str_to_indexes(indexes, len(input_obj), allow_missing=not err_if_missing)
     if err_if_empty and len(real_idxs) == 0:
         raise Exception(f"Nothing was selected based on indexes found in '{indexes}'.")
     return select_indexes(input_obj, real_idxs)
+
+def hook(obj, attr):
+    def dec(f):
+        f = functools.update_wrapper(f, getattr(obj,attr))
+        setattr(obj,attr,f)
+        return f
+    return dec
+
+def cached(duration):
+    def dec(f):
+        cached_ret = None
+        cache_time = 0
+        def cached_func():
+            nonlocal cache_time, cached_ret
+            if time.time() > cache_time + duration or cached_ret is None:
+                cache_time = time.time()
+                cached_ret = f()
+            return cached_ret
+        return cached_func
+    return dec
