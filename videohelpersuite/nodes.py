@@ -18,9 +18,11 @@ from .image_latent_nodes import *
 from .load_images_nodes import LoadImagesFromDirectoryUpload, LoadImagesFromDirectoryPath
 from .load_video_nodes import LoadVideoUpload, LoadVideoPath, LoadVideoFFmpegUpload, LoadVideoFFmpegPath, LoadImagePath
 from .logger import logger
+from .utils import ffmpeg_path, get_audio, hash_path, validate_path, requeue_workflow, \
+    gifski_path, calculate_file_hash, strip_path, try_download_video, is_url, \
+    imageOrLatent, BIGMAX, merge_filter_args, ENCODE_ARGS, floatOrInt, cached, \
+    ContainsAll
 from .server import *
-from .utils import ffmpeg_path, get_audio, hash_path, validate_path, requeue_workflow, gifski_path, strip_path, \
-    try_download_video, is_url, imageOrLatent
 
 VHS_VIDEO_FORMATS_FOLDER_NAME = "VHS_video_formats"
 folder_paths.add_model_folder_path(VHS_VIDEO_FORMATS_FOLDER_NAME, extensions={".json"})
@@ -47,67 +49,85 @@ def get_full_path(format_name_without_json_ext: str) -> str:
     raise FileNotFoundError(format_name_without_json_ext)
 
 
-def gen_format_widgets(video_format):
-    for k in video_format:
-        if k.endswith("_pass"):
-            for i in range(len(video_format[k])):
-                if isinstance(video_format[k][i], list):
-                    item = [video_format[k][i]]
-                    yield item
-                    video_format[k][i] = item[0]
+def flatten_list(l):
+    ret = []
+    for e in l:
+        if isinstance(e, list):
+            ret.extend(e)
         else:
-            if isinstance(video_format[k], list):
-                item = [video_format[k]]
-                yield item
-                video_format[k] = item[0]
+            ret.append(e)
+    return ret
 
+def iterate_format(video_format, for_widgets=True):
+    """Provides an iterator over widgets, or arguments"""
+    def indirector(cont, index):
+        if isinstance(cont[index], list) and (not for_widgets
+          or len(cont[index])> 1 and not isinstance(cont[index][1], dict)):
+            inp = yield cont[index]
+            if inp is not None:
+                cont[index] = inp
+                yield
+    for k in video_format:
+        if k == "extra_widgets":
+            if for_widgets:
+                yield from video_format["extra_widgets"]
+        elif k.endswith("_pass"):
+            for i in range(len(video_format[k])):
+                yield from indirector(video_format[k], i)
+            if not for_widgets:
+                video_format[k] = flatten_list(video_format[k])
+        else:
+            yield from indirector(video_format, k)
 
-def get_video_formats():
-    formats = []
+def get_video_formats() -> tuple[str, dict[str,dict]]:
+    format_files = {}
     for format_name in get_video_format_files():
-        format_name = format_name[:-5]
-        video_format_path = get_full_path(format_name + ".json")
-        with open(video_format_path, 'r') as stream:
+        format_files[format_name] = get_full_path(format_name)
+    formats = []
+    format_widgets = {}
+    for format_name, path in format_files.items():
+        with open(path, 'r') as stream:
             video_format = json.load(stream)
         if "gifski_pass" in video_format and gifski_path is None:
             # Skip format
             continue
-        widgets = [w[0] for w in gen_format_widgets(video_format)]
+        widgets = list(iterate_format(video_format))
+        formats.append("video/" + format_name)
         if (len(widgets) > 0):
-            formats.append(["video/" + format_name, widgets])
-        else:
-            formats.append("video/" + format_name)
-    return formats
-
-
-def get_format_widget_defaults(format_name):
-    video_format_path = get_full_path(format_name)
-    with open(video_format_path, 'r') as stream:
-        video_format = json.load(stream)
-    results = {}
-    for w in gen_format_widgets(video_format):
-        if len(w[0]) > 2 and 'default' in w[0][2]:
-            default = w[0][2]['default']
-        else:
-            if type(w[0][1]) is list:
-                default = w[0][1][0]
-            else:
-                # NOTE: This doesn't respect max/min, but should be good enough as a fallback to a fallback to a fallback
-                default = {"BOOLEAN": False, "INT": 0, "FLOAT": 0, "STRING": ""}[w[0][1]]
-        results[w[0][0]] = default
-    return results
+            format_widgets["video/"+ format_name] = widgets
+    return formats, format_widgets
 
 
 def apply_format_widgets(format_name, kwargs):
-    video_format_path = get_full_path(format_name + ".json")
+    video_format_path = get_full_path(format_name)
     with open(video_format_path, 'r') as stream:
         video_format = json.load(stream)
-    for w in gen_format_widgets(video_format):
-        assert (w[0][0] in kwargs)
-        if len(w[0]) > 3:
-            w[0] = Template(w[0][3]).substitute(val=kwargs[w[0][0]])
-        else:
-            w[0] = str(kwargs[w[0][0]])
+    for w in iterate_format(video_format):
+        if w[0] not in kwargs:
+            if len(w) > 2 and 'default' in w[2]:
+                default = w[2]['default']
+            else:
+                if type(w[1]) is list:
+                    default = w[1][0]
+                else:
+                    #NOTE: This doesn't respect max/min, but should be good enough as a fallback to a fallback to a fallback
+                    default = {"BOOLEAN": False, "INT": 0, "FLOAT": 0, "STRING": ""}[w[1]]
+            kwargs[w[0]] = default
+            logger.warn(f"Missing input for {w[0][0]} has been set to {default}")
+    wit = iterate_format(video_format, False)
+    for w in wit:
+        while isinstance(w, list):
+            if len(w) == 1:
+                #TODO: mapping=kwargs should be safer, but results in key errors, investigate why
+                w = [Template(x).substitute(**kwargs) for x in w[0]]
+                break
+            elif isinstance(w[1], dict):
+                w = w[1][str(kwargs[w[0]])]
+            elif len(w) > 3:
+                w = Template(w[3]).substitute(val=kwargs[w[0]])
+            else:
+                w = str(kwargs[w[0]])
+        wit.send(w)
     return video_format
 
 
@@ -162,9 +182,9 @@ def ffmpeg_process(args, video_format, video_metadata, file_path, env):
                 # and seems to never occur concurrent to the metadata issue
                 if os.path.exists(file_path):
                     raise Exception("An error occurred in the ffmpeg subprocess:\n" \
-                                    + err.decode("utf-8"))
+                                    + err.decode(*ENCODE_ARGS))
                 # Res was not set
-                print(err.decode("utf-8"), end="", file=sys.stderr)
+                print(err.decode(*ENCODE_ARGS), end="", file=sys.stderr)
                 logger.warn("An error occurred when saving with metadata")
     if res != b'':
         with subprocess.Popen(args + [file_path], stderr=subprocess.PIPE,
@@ -180,18 +200,19 @@ def ffmpeg_process(args, video_format, video_metadata, file_path, env):
             except BrokenPipeError as e:
                 res = proc.stderr.read()
                 raise Exception("An error occurred in the ffmpeg subprocess:\n" \
-                                + res.decode("utf-8"))
+                                + res.decode(*ENCODE_ARGS))
     yield total_frames_output
     if len(res) > 0:
-        print(res.decode("utf-8"), end="", file=sys.stderr)
+        print(res.decode(*ENCODE_ARGS), end="", file=sys.stderr)
 
 
-def gifski_process(args, video_format, file_path, env):
+def gifski_process(args, dimensions, video_format, file_path, env):
     frame_data = yield
     with subprocess.Popen(args + video_format['main_pass'] + ['-f', 'yuv4mpegpipe', '-'],
                           stderr=subprocess.PIPE, stdin=subprocess.PIPE,
                           stdout=subprocess.PIPE, env=env) as procff:
         with subprocess.Popen([gifski_path] + video_format['gifski_pass']
+                              + ['-W', f'{dimensions[0]}', '-H', f'{dimensions[1]}']
                               + ['-q', '-o', file_path, '-'], stderr=subprocess.PIPE,
                               stdin=procff.stdout, stdout=subprocess.PIPE,
                               env=env) as procgs:
@@ -210,14 +231,14 @@ def gifski_process(args, video_format, file_path, env):
                 resgs = procgs.stderr.read()
                 raise Exception("An error occurred while creating gifski output\n" \
                                 + "Make sure you are using gifski --version >=1.32.0\nffmpeg: " \
-                                + resff.decode("utf-8") + '\ngifski: ' + resgs.decode("utf-8"))
+                                + resff.decode(*ENCODE_ARGS) + '\ngifski: ' + resgs.decode(*ENCODE_ARGS))
     if len(resff) > 0:
-        print(resff.decode("utf-8"), end="", file=sys.stderr)
+        print(resff.decode(*ENCODE_ARGS), end="", file=sys.stderr)
     if len(resgs) > 0:
-        print(resgs.decode("utf-8"), end="", file=sys.stderr)
+        print(resgs.decode(*ENCODE_ARGS), end="", file=sys.stderr)
     # should always be empty as the quiet flag is passed
     if len(outgs) > 0:
-        print(outgs.decode("utf-8"))
+        print(outgs.decode(*ENCODE_ARGS))
 
 
 def to_pingpong(inp):
@@ -231,17 +252,18 @@ def to_pingpong(inp):
 class VideoCombine:
     @classmethod
     def INPUT_TYPES(s):
-        ffmpeg_formats = get_video_formats()
+        ffmpeg_formats, format_widgets = get_video_formats()
+        format_widgets["image/webp"] = [['lossless', "BOOLEAN", {'default': True}]]
         return {
             "required": {
                 "images": (imageOrLatent,),
                 "frame_rate": (
-                    "FLOAT",
+                    floatOrInt,
                     {"default": 8, "min": 1, "step": 1},
                 ),
                 "loop_count": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
                 "filename_prefix": ("STRING", {"default": "AnimateDiff"}),
-                "format": (["image/gif", "image/webp"] + ffmpeg_formats,),
+                "format": (["image/gif", "image/webp"] + ffmpeg_formats, {'formats': format_widgets}),
                 "pingpong": ("BOOLEAN", {"default": False}),
                 "save_output": ("BOOLEAN", {"default": True}),
             },
@@ -250,11 +272,11 @@ class VideoCombine:
                 "meta_batch": ("VHS_BatchManager",),
                 "vae": ("VAE",),
             },
-            "hidden": {
+            "hidden": ContainsAll({
                 "prompt": "PROMPT",
                 "extra_pnginfo": "EXTRA_PNGINFO",
                 "unique_id": "UNIQUE_ID"
-            },
+            }),
         }
 
     RETURN_TYPES = ("VHS_FILENAMES",)
@@ -279,7 +301,8 @@ class VideoCombine:
             unique_id=None,
             manual_format_widgets=None,
             meta_batch=None,
-            vae=None
+            vae=None,
+        **kwargs
     ):
         if latents is not None:
             images = latents
@@ -297,8 +320,8 @@ class VideoCombine:
         pbar = ProgressBar(num_frames)
         if vae is not None:
             downscale_ratio = getattr(vae, "downscale_ratio", 8)
-            width = images.size(3) * downscale_ratio
-            height = images.size(2) * downscale_ratio
+            width = images.size(-1) * downscale_ratio
+            height = images.size(-2) * downscale_ratio
             frames_per_batch = (1920 * 1080 * 16) // (width * height) or 1
 
             # Python 3.12 adds an itertools.batched, but it's easily replicated for legacy support
@@ -315,6 +338,9 @@ class VideoCombine:
             first_image = next(images)
             # repush first_image
             images = itertools.chain([first_image], images)
+            #A single image has 3 dimensions. Discard higher dimensions
+            while len(first_image.shape) > 3:
+                first_image = first_image[0]
         else:
             first_image = images[0]
             images = iter(images)
@@ -342,6 +368,9 @@ class VideoCombine:
             for x in extra_pnginfo:
                 metadata.add_text(x, json.dumps(extra_pnginfo[x]))
                 video_metadata[x] = extra_pnginfo[x]
+            extra_options = extra_pnginfo.get('workflow', {}).get('extra', {})
+        else:
+            extra_options = {}
         metadata.add_text("CreationTime", datetime.datetime.now().isoformat(" ")[:19])
 
         if meta_batch is not None and unique_id in meta_batch.outputs:
@@ -367,13 +396,14 @@ class VideoCombine:
             output_process = None
 
         # save first frame as png to keep metadata
-        file = f"{filename}_{counter:05}.png"
-        file_path = os.path.join(full_output_folder, file)
-        Image.fromarray(tensor_to_bytes(first_image)).save(
-            file_path,
-            pnginfo=metadata,
-            compress_level=4,
-        )
+        first_image_file = f"{filename}_{counter:05}.png"
+        file_path = os.path.join(full_output_folder, first_image_file)
+        if extra_options.get('VHS_MetadataImage', True) != False:
+            Image.fromarray(tensor_to_bytes(first_image)).save(
+                file_path,
+                pnginfo=metadata,
+                compress_level=4,
+            )
         output_files.append(file_path)
 
         format_type, format_ext = format.split("/")
@@ -388,11 +418,16 @@ class VideoCombine:
                 exif = Image.Exif()
                 exif[ExifTags.IFD.Exif] = {36867: datetime.datetime.now().isoformat(" ")[:19]}
                 image_kwargs['exif'] = exif
+                image_kwargs['lossless'] = kwargs.get("lossless", True)
             file = f"{filename}_{counter:05}.{format_ext}"
             file_path = os.path.join(full_output_folder, file)
             if pingpong:
                 images = to_pingpong(images)
-            frames = map(lambda x: Image.fromarray(tensor_to_bytes(x)), images)
+            def frames_gen(images):
+                for i in images:
+                    pbar.update(1)
+                    yield Image.fromarray(tensor_to_bytes(i))
+            frames = frames_gen(images)
             # Use pillow directly to save an animated image
             next(frames).save(
                 file_path,
@@ -410,27 +445,14 @@ class VideoCombine:
             if ffmpeg_path is None:
                 raise ProcessLookupError(f"ffmpeg is required for video outputs and could not be found.\nIn order to use video outputs, you must either:\n- Install imageio-ffmpeg with pip,\n- Place a ffmpeg executable in {os.path.abspath('')}, or\n- Install ffmpeg and add it to the system path.")
 
-            # Acquire additional format_widget values
-            kwargs = None
-            if manual_format_widgets is None:
-                if prompt is not None:
-                    kwargs = prompt[unique_id]['inputs']
-                else:
-                    manual_format_widgets = {}
-            if kwargs is None:
-                kwargs = get_format_widget_defaults(format_ext)
-                missing = {}
-                for k in kwargs.keys():
-                    if k in manual_format_widgets:
-                        kwargs[k] = manual_format_widgets[k]
-                    else:
-                        missing[k] = kwargs[k]
-                if len(missing) > 0:
-                    logger.warn("Extra format values were not provided, the following defaults will be used: " + str(kwargs) + "\nThis is likely due to usage of ComfyUI-to-python. These values can be manually set by supplying a manual_format_widgets argument")
+            if manual_format_widgets is not None:
+                logger.warn("Format args can now be passed directly. The manual_format_widgets argument is now deprecated")
+                kwargs.update(manual_format_widgets)
 
-            video_format = apply_format_widgets(format_ext, kwargs)
             has_alpha = first_image.shape[-1] == 4
-            dim_alignment = video_format.get("dim_alignment", 8)
+            kwargs["has_alpha"] = has_alpha
+            video_format = apply_format_widgets(format_ext, kwargs)
+            dim_alignment = video_format.get("dim_alignment", 2)
             if (first_image.shape[1] % dim_alignment) or (first_image.shape[0] % dim_alignment):
                 # output frames must be padded
                 to_pad = (-first_image.shape[1] % dim_alignment,
@@ -445,12 +467,11 @@ class VideoCombine:
                     return padded.permute((1, 2, 0))
 
                 images = map(pad, images)
-                new_dims = (-first_image.shape[1] % dim_alignment + first_image.shape[1],
-                            -first_image.shape[0] % dim_alignment + first_image.shape[0])
-                dimensions = f"{new_dims[0]}x{new_dims[1]}"
+                dimensions = (-first_image.shape[1] % dim_alignment + first_image.shape[1],
+                              -first_image.shape[0] % dim_alignment + first_image.shape[0])
                 logger.warn("Output images were not of valid resolution and have had padding applied")
             else:
-                dimensions = f"{first_image.shape[1]}x{first_image.shape[0]}"
+                dimensions = (first_image.shape[1], first_image.shape[0])
             if loop_count > 0:
                 loop_args = ["-vf", "loop=loop=" + str(loop_count) + ":size=" + str(num_frames)]
             else:
@@ -478,7 +499,18 @@ class VideoCombine:
             if bitrate is not None:
                 bitrate_arg = ["-b:v", str(bitrate) + "M" if video_format.get('megabit') == 'True' else str(bitrate) + "K"]
             args = [ffmpeg_path, "-v", "error", "-f", "rawvideo", "-pix_fmt", i_pix_fmt,
-                    "-s", dimensions, "-r", str(frame_rate), "-i", "-"] \
+                    # The image data is in an undefined generic RGB color space, which in practice means sRGB.
+                    # sRGB has the same primaries and matrix as BT.709, but a different transfer function (gamma),
+                    # called by the sRGB standard name IEC 61966-2-1. However, video hosting platforms like YouTube
+                    # standardize on full BT.709 and will convert the colors accordingly. This last minute change
+                    # in colors can be confusing to users. We can counter it by lying about the transfer function
+                    # on a per format basis, i.e. for video we will lie to FFmpeg that it is already BT.709. Also,
+                    # because the input data is in RGB (not YUV) it is more efficient (fewer scale filter invocations)
+                    # to specify the input color space as RGB and then later, if the format actually wants YUV,
+                    # to convert it to BT.709 YUV via FFmpeg's -vf "scale=out_color_matrix=bt709".
+                    "-color_range", "pc", "-colorspace", "rgb", "-color_primaries", "bt709",
+                    "-color_trc", video_format.get("fake_trc", "iec61966-2-1"),
+                    "-s", f"{dimensions[0]}x{dimensions[1]}", "-r", str(frame_rate), "-i", "-"] \
                    + loop_args
 
             images = map(lambda x: x.tobytes(), images)
@@ -495,21 +527,26 @@ class VideoCombine:
                     raise Exception("Formats which require a pre_pass are incompatible with Batch Manager.")
                 images = [b''.join(images)]
                 os.makedirs(folder_paths.get_temp_directory(), exist_ok=True)
-                pre_pass_args = args[:13] + video_format['pre_pass']
+                in_args_len = args.index("-i") + 2 # The index after ["-i", "-"]
+                pre_pass_args = args[:in_args_len] + video_format['pre_pass']
+                merge_filter_args(pre_pass_args)
                 try:
                     subprocess.run(pre_pass_args, input=images[0], env=env,
                                    capture_output=True, check=True)
                 except subprocess.CalledProcessError as e:
                     raise Exception("An error occurred in the ffmpeg prepass:\n" \
-                                    + e.stderr.decode("utf-8"))
+                                    + e.stderr.decode(*ENCODE_ARGS))
             if "inputs_main_pass" in video_format:
-                args = args[:13] + video_format['inputs_main_pass'] + args[13:]
+                in_args_len = args.index("-i") + 2 # The index after ["-i", "-"]
+                args = args[:in_args_len] + video_format['inputs_main_pass'] + args[in_args_len:]
 
             if output_process is None:
                 if 'gifski_pass' in video_format:
-                    output_process = gifski_process(args, video_format, file_path, env)
+                    format = 'image/gif'
+                    output_process = gifski_process(args, dimensions, video_format, file_path, env)
                 else:
                     args += video_format['main_pass'] + bitrate_arg
+                    merge_filter_args(args)
                     output_process = ffmpeg_process(args, video_format, video_metadata, file_path, env)
                 # Proceed to first yield
                 output_process.send(None)
@@ -559,45 +596,51 @@ class VideoCombine:
                 # Reconsider forcing apad/shortest
                 channels = audio['waveform'].size(1)
                 min_audio_dur = total_frames_output / frame_rate + 1
+                if video_format.get('trim_to_audio', 'False') != 'False':
+                    apad = []
+                else:
+                    apad = ["-af", "apad=whole_dur="+str(min_audio_dur)]
                 mux_args = [ffmpeg_path, "-v", "error", "-n", "-i", file_path,
                             "-ar", str(audio['sample_rate']), "-ac", str(channels),
                             "-f", "f32le", "-i", "-", "-c:v", "copy"] \
                            + video_format["audio_pass"] \
-                           + ["-af", "apad=whole_dur=" + str(min_audio_dur),
+                           + apad + [
                               "-shortest", output_file_with_audio_path]
 
                 audio_data = audio['waveform'].squeeze(0).transpose(0, 1) \
                     .numpy().tobytes()
+                merge_filter_args(mux_args, '-af')
                 try:
                     res = subprocess.run(mux_args, input=audio_data,
                                          env=env, capture_output=True, check=True)
                 except subprocess.CalledProcessError as e:
                     raise Exception("An error occured in the ffmpeg subprocess:\n" \
-                                    + e.stderr.decode("utf-8"))
+                                    + e.stderr.decode(*ENCODE_ARGS))
                 if res.stderr:
-                    print(res.stderr.decode("utf-8"), end="", file=sys.stderr)
+                    print(res.stderr.decode(*ENCODE_ARGS), end="", file=sys.stderr)
                 output_files.append(output_file_with_audio_path)
                 # Return this file with audio to the webui.
                 # It will be muted unless opened or saved with right click
                 file = output_file_with_audio
-
-        previews = [
-            {
+        if extra_options.get('VHS_KeepIntermediate', True) == False:
+            for intermediate in output_files[1:-1]:
+                if os.path.exists(intermediate):
+                    os.remove(intermediate)
+        preview = {
                 "filename": file,
                 "subfolder": subfolder,
                 "type": "output" if save_output else "temp",
                 "format": format,
                 "frame_rate": frame_rate,
+                "workflow": first_image_file,
+                "fullpath": output_files[-1],
             }
-        ]
         if num_frames == 1 and 'png' in format and '%03d' in file:
-            previews[0]['format'] = 'image/png'
-            previews[0]['filename'] = file.replace('%03d', '001')
-        return {"ui": {"gifs": previews}, "result": ((save_output, output_files),)}
+            preview['format'] = 'image/png'
+            preview['filename'] = file.replace('%03d', '001')
+        return {"ui": {"gifs": [preview]}, "result": ((save_output, output_files),)}
 
-    @classmethod
-    def VALIDATE_INPUTS(self, format, **kwargs):
-        return True
+
 
 
 class LoadAudio:
@@ -608,7 +651,9 @@ class LoadAudio:
             "required": {
                 "audio_file": ("STRING", {"default": "input/", "vhs_path_extensions": ['wav', 'mp3', 'ogg', 'm4a', 'flac']}),
             },
-            "optional": {"seek_seconds": ("FLOAT", {"default": 0, "min": 0})}
+            "optional": {"seek_seconds": ("FLOAT", {"default": 0, "min": 0}),
+                          "duration": ("FLOAT" , {"default": 0, "min": 0, "max": 10000000, "step": 0.01}),
+                          }
         }
 
     RETURN_TYPES = ("AUDIO",)
@@ -616,7 +661,7 @@ class LoadAudio:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/audio"
     FUNCTION = "load_audio"
 
-    def load_audio(self, audio_file, seek_seconds):
+    def load_audio(self, audio_file, seek_seconds, duration):
         audio_file = strip_path(audio_file)
         if audio_file is None or validate_path(audio_file) != True:
             raise Exception("audio_file is not a valid path: " + audio_file)
@@ -624,7 +669,7 @@ class LoadAudio:
             audio_file = try_download_video(audio_file) or audio_file
         # Eagerly fetch the audio since the user must be using it if the
         # node executes, unlike Load Video
-        return (get_audio(audio_file, start_time=seek_seconds),)
+        return (get_audio(audio_file, start_time=seek_seconds, duration=duration),)
 
     @classmethod
     def IS_CHANGED(s, audio_file, seek_seconds):
@@ -703,9 +748,9 @@ class AudioToVHSAudio:
                                  capture_output=True, check=True)
         except subprocess.CalledProcessError as e:
             raise Exception("An error occured in the ffmpeg subprocess:\n" \
-                            + e.stderr.decode("utf-8"))
+                            + e.stderr.decode(*ENCODE_ARGS))
         if res.stderr:
-            print(res.stderr.decode("utf-8"), end="", file=sys.stderr)
+            print(res.stderr.decode(*ENCODE_ARGS), end="", file=sys.stderr)
         return (lambda: res.stdout,)
 
 
@@ -733,8 +778,8 @@ class VHSAudioToAudio:
             audio = torch.frombuffer(bytearray(res.stdout), dtype=torch.float32)
         except subprocess.CalledProcessError as e:
             raise Exception("An error occured in the ffmpeg subprocess:\n" \
-                            + e.stderr.decode("utf-8"))
-        match = re.search(', (\\d+) Hz, (\\w+), ', res.stderr.decode('utf-8'))
+                            + e.stderr.decode(*ENCODE_ARGS))
+        match = re.search(', (\\d+) Hz, (\\w+), ', res.stderr.decode(*ENCODE_ARGS))
         if match:
             ar = int(match.group(1))
             # NOTE: Just throwing an error for other channel types right now
@@ -981,14 +1026,16 @@ class Unbatch:
     RETURN_NAMES = ("unbatched",)
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
     FUNCTION = "unbatch"
-    EXPERIMENTAL = True
 
     def unbatch(self, batched):
         if isinstance(batched[0], torch.Tensor):
             return (torch.cat(batched),)
         if isinstance(batched[0], dict):
             out = batched[0].copy()
-            out['samples'] = torch.cat([x['samples'] for x in batched])
+            if 'samples' in out:
+                out['samples'] = torch.cat([x['samples'] for x in batched])
+            if 'waveform' in out:
+                out['waveform'] = torch.cat([x['waveform'] for x in batched])
             out.pop('batch_index', None)
             return (out,)
         return (functools.reduce(lambda x, y: x + y, batched),)
@@ -996,6 +1043,19 @@ class Unbatch:
     @classmethod
     def VALIDATE_INPUTS(cls, input_types):
         return True
+class SelectLatest:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {"filename_prefix": ("STRING", {'default': 'output/AnimateDiff', 'vhs_path_extensions': []}),
+                             "filename_postfix": ("STRING", {"placeholder": ".webm"})}}
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES =("Filename",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
+    FUNCTION = "select_latest"
+    EXPERIMENTAL = True
+
+    def select_latest(self, filename_prefix, filename_postfix):
+        assert False, "Not Reachable"
 
 
 NODE_CLASS_MAPPINGS = {
@@ -1040,6 +1100,7 @@ NODE_CLASS_MAPPINGS = {
     "VHS_SelectImages": SelectImages,
     "VHS_SelectMasks": SelectMasks,
     "VHS_Unbatch": Unbatch,
+    "VHS_SelectLatest": SelectLatest,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_VideoCombine": "Video Combine 🎥🅥🅗🅢",
@@ -1083,6 +1144,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_SelectImages": "Select Images 🎥🅥🅗🅢",
     "VHS_SelectMasks": "Select Masks 🎥🅥🅗🅢",
     "VHS_Unbatch": "Unbatch 🎥🅥🅗🅢",
+    "VHS_SelectLatest": "Select Latest 🎥🅥🅗🅢",
 }
 
 documentation.format_descriptions(NODE_CLASS_MAPPINGS)
