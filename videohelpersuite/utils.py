@@ -1,16 +1,16 @@
+import functools
 import hashlib
 import os
 import re
 import shutil
 import subprocess
 import sys
-import warnings
-import re
 import time
+import warnings
 from collections.abc import Mapping
 from typing import Iterable
 from typing import Union
-import functools
+
 import torch
 from torch import Tensor
 

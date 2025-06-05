@@ -1,23 +1,22 @@
-import os
 import itertools
-import numpy as np
-import torch
-from PIL import Image, ImageOps
-import cv2
-import psutil
-import subprocess
+import os
 import re
+import subprocess
 import time
 
-from comfy.cmd import folder_paths
-from comfy.utils import common_upscale, ProgressBar
-import nodes
-from comfy.k_diffusion.utils import FolderOfImages
-from .logger import logger
-from .utils import BIGMAX, DIMMAX, calculate_file_hash, get_sorted_dir_files_from_directory,\
-        lazy_get_audio, hash_path, validate_path, strip_path, try_download_video,  \
-        is_url, imageOrLatent, ffmpeg_path, ENCODE_ARGS, floatOrInt
+import cv2
+import numpy as np
+import psutil
+import torch
 
+from comfy.cmd import folder_paths
+from comfy.k_diffusion.utils import FolderOfImages
+from comfy.utils import common_upscale, ProgressBar
+from . import nodes
+from .logger import logger
+from .utils import BIGMAX, DIMMAX, calculate_file_hash, lazy_get_audio, hash_path, validate_path, strip_path, \
+    try_download_video, \
+    is_url, imageOrLatent, ffmpeg_path, ENCODE_ARGS, floatOrInt
 
 video_extensions = ['webm', 'mp4', 'mkv', 'gif', 'mov']
 

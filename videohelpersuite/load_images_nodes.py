@@ -1,15 +1,15 @@
-import os
 import hashlib
+import itertools
+import os
+
 import numpy as np
 import torch
 from PIL import Image, ImageOps
-import itertools
 
 from comfy.cmd import folder_paths
 from comfy.k_diffusion.utils import FolderOfImages
 from comfy.utils import common_upscale, ProgressBar
-from .logger import logger
-from .utils import BIGMAX, calculate_file_hash, get_sorted_dir_files_from_directory, validate_path, strip_path
+from .utils import BIGMAX, calculate_file_hash, get_sorted_dir_files_from_directory, strip_path
 
 
 def is_changed_load_images(directory: str, image_load_cap: int = 0, skip_first_images: int = 0, select_every_nth: int = 1, **kwargs):
